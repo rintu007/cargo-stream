@@ -56,12 +56,24 @@ class TransalliancePdfAssistant extends PdfClient
         // Extract freight price
         $freight_price = 0;
         $freight_currency = 'EUR';
-        
+
         $priceLine = array_find_key($cleanLines, fn($l) => Str::contains($l, 'SHIPPING PRICE'));
-        if ($priceLine !== false && isset($cleanLines[$priceLine])) {
-            preg_match('/([0-9,\.]+)\s+EUR/', $cleanLines[$priceLine], $priceMatch);
-            if ($priceMatch && isset($priceMatch[1])) {
-                $freight_price = uncomma($priceMatch[1]);
+        if ($priceLine !== false) {
+            // Check the next line for the price value
+            if (isset($cleanLines[$priceLine + 1])) {
+                $priceValueLine = $cleanLines[$priceLine + 1];
+                // Extract number with comma decimal separator
+                if (preg_match('/^([0-9.,]+)/', $priceValueLine, $priceMatch)) {
+                    $freight_price = uncomma($priceMatch[1]);
+                }
+            }
+            
+            // Optional: Check for currency on the line after price (if needed)
+            if (isset($cleanLines[$priceLine + 2])) {
+                $currencyLine = $cleanLines[$priceLine + 2];
+                if (preg_match('/^([A-Z]{3})/', $currencyLine, $currencyMatch)) {
+                    $freight_currency = $currencyMatch[1];
+                }
             }
         }
 
