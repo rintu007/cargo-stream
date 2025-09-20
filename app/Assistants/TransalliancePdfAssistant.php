@@ -5,6 +5,7 @@ namespace App\Assistants;
 use App\GeonamesCountry;
 use Carbon\Carbon;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Log;
 
 class TransalliancePdfAssistant extends PdfClient
 {
@@ -262,46 +263,57 @@ class TransalliancePdfAssistant extends PdfClient
     }
 
     protected function extractCargos(array $cleanLines) {
-        $weightLine = array_find_key($cleanLines, fn($l) => Str::contains($l, 'Weight . :'));
-        
-        $weight = 0;
-        if ($weightLine !== false && isset($cleanLines[$weightLine])) {
-            preg_match('/Weight \. :\s*([0-9,\.]+)/', $cleanLines[$weightLine], $weightMatch);
-            $weight = isset($weightMatch[1]) ? uncomma($weightMatch[1]) : 0;
+    $weight = 0;
+    $ldm = 0;
+    $title = "General cargo";
+    $otNumber = '';
+    Log::info(json_encode($cleanLines));
+
+    // Find ALL cargo sections first
+    $cargoSections = [];
+    for ($i = 0; $i < count($cleanLines) - 15; $i++) {
+        if (isset($cleanLines[$i]) && Str::contains($cleanLines[$i], 'LM . . . :') &&
+            isset($cleanLines[$i + 1]) && Str::contains($cleanLines[$i + 1], 'Parc. nb :') &&
+            isset($cleanLines[$i + 2]) && Str::contains($cleanLines[$i + 2], 'Pal. nb. :') &&
+            isset($cleanLines[$i + 3]) && Str::contains($cleanLines[$i + 3], 'Weight . :')) {
+            $cargoSections[] = $i;
         }
-
-        $lmLine = array_find_key($cleanLines, fn($l) => Str::contains($l, 'LM . . . :'));
-        $ldm = 0;
-        if ($lmLine !== false && isset($cleanLines[$lmLine])) {
-            preg_match('/LM \. \. \. :\s*([0-9,\.]+)/', $cleanLines[$lmLine], $lmMatch);
-            $ldm = isset($lmMatch[1]) ? uncomma($lmMatch[1]) : 0;
-        }
-
-        $natureLine = array_find_key($cleanLines, fn($l) => Str::contains($l, 'M. nature:'));
-        $package_type = "other";
-        $title = "General cargo";
-        if ($natureLine !== false && isset($cleanLines[$natureLine])) {
-            preg_match('/M\. nature:\s*([A-Za-z\s]+)/', $cleanLines[$natureLine], $natureMatch);
-            if (isset($natureMatch[1])) {
-                $nature = trim($natureMatch[1]);
-                $package_type = $this->mapPackageType($nature);
-                $title = $nature;
-            }
-        }
-
-        $otLine = array_find_key($cleanLines, fn($l) => Str::contains($l, 'OT :'));
-        $otNumber = ($otLine !== false && isset($cleanLines[$otLine])) ? trim(str_replace('OT :', '', $cleanLines[$otLine])) : '';
-
-        return [[
-            'title' => $title,
-            'package_count' => 1,
-            'package_type' => $package_type,
-            'weight' => $weight,
-            'ldm' => $ldm,
-            'number' => $otNumber,
-            'type' => $weight > 10000 ? 'FTL' : 'LTL'
-        ]];
     }
+
+    Log::info(json_encode($cargoSections));
+
+    // Use the LAST cargo section (under "Delivery")
+    if (!empty($cargoSections)) {
+        $i = end($cargoSections); // Get the last section index
+        
+        // Extract values with CORRECTED offsets
+        if (isset($cleanLines[$i + 7]) && preg_match('/^\d{6}$/', trim($cleanLines[$i + 7]))) {
+            $otNumber = trim($cleanLines[$i + 7]); // OT number at position +9
+        }
+        
+        if (isset($cleanLines[$i + 8]) && preg_match('/^[\d,]+$/', trim($cleanLines[$i + 8]))) {
+            $ldm = uncomma(trim($cleanLines[$i + 8])); // LDM at position +11
+        }
+        
+        if (isset($cleanLines[$i + 9]) && preg_match('/^[\d,]+$/', trim($cleanLines[$i + 9]))) {
+            $weight = uncomma(trim($cleanLines[$i + 9])); // Weight at position +13
+        }
+        
+        if (isset($cleanLines[$i + 10]) && !empty(trim($cleanLines[$i + 10]))) {
+            $title = trim($cleanLines[$i + 10]); // Title at position +15
+        }
+    }
+
+    return [[
+        'title' => $title,
+        'package_count' => 1,
+        'package_type' => $this->mapPackageType($title),
+        'weight' => $weight,
+        'ldm' => $ldm,
+        'number' => $otNumber,
+        'type' => $weight > 10000 ? 'FTL' : 'LTL'
+    ]];
+}
 
     protected function mapPackageType(string $type) {
         return static::PACKAGE_TYPE_MAP[$type] ?? "other";
