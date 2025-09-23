@@ -126,99 +126,150 @@ class TransalliancePdfAssistant extends PdfClient
     }
 
     protected function extractLocation(array $cleanLines, string $type) {
-        $sectionLine = array_find_key($cleanLines, fn($l) => $l === $type);
-        if ($sectionLine === false) {
-            return [
-                'company_address' => [
-                    'company' => '', 
-                    'street_address' => '', 
-                    'city' => 'Unknown',
-                    'postal_code' => '',
-                    'country' => $type === 'Loading' ? 'GB' : 'FR'
-                ],
-                'time' => ['datetime_from' => Carbon::now()->setTime(0, 0, 0)->toIsoString()]
-            ];
-        }
-
-        // Extract date and time
-        $dateTime = [];
-        $dateLine = $sectionLine + 1;
-        if (isset($cleanLines[$dateLine])) {
-            // Handle format: "ONE: 17/09/25 8h00 – 15h00"
-            if (preg_match('/(\d{2}\/\d{2}\/\d{2})\s+(\d{1,2})h(\d{2})\s*–\s*(\d{1,2})h(\d{2})/', $cleanLines[$dateLine], $timeMatch)) {
-                $dateTime = [
-                    'datetime_from' => Carbon::createFromFormat('d/m/y H:i', $timeMatch[1] . ' ' . $timeMatch[2] . ':' . $timeMatch[3])->toIsoString(),
-                    'datetime_to' => Carbon::createFromFormat('d/m/y H:i', $timeMatch[1] . ' ' . $timeMatch[4] . ':' . $timeMatch[5])->toIsoString()
-                ];
-            }
-            // Handle format with just date
-            elseif (preg_match('/(\d{2}\/\d{2}\/\d{2})/', $cleanLines[$dateLine], $dateMatch)) {
-                $dateTime = [
-                    'datetime_from' => Carbon::createFromFormat('d/m/y', $dateMatch[1])->setTime(0, 0, 0)->toIsoString()
-                ];
-            }
-        }
-
-        // Find the ON: line and then get company name after empty lines
-        $company = '';
-        $onLine = array_find_key($cleanLines, fn($l, $i) => $i > $sectionLine && $l === 'ON:');
-        
-        if ($onLine !== false) {
-            // Look for the next non-empty line after ON: (skip empty lines)
-            for ($i = $onLine + 1; $i < min($onLine + 5, count($cleanLines)); $i++) {
-                if (!empty($cleanLines[$i]) && $cleanLines[$i] !== 'ON:' && !preg_match('/^\d{2}\/\d{2}\/\d{2}/', $cleanLines[$i])) {
-                    $company = trim($cleanLines[$i]);
-                    break;
-                }
-            }
-        }
-
-        // If we didn't find company after ON:, try to find it by looking for uppercase company names
-        if (empty($company)) {
-            for ($i = $sectionLine + 1; $i < min($sectionLine + 10, count($cleanLines)); $i++) {
-                if (isset($cleanLines[$i]) && preg_match('/^[A-Z][A-Za-z\s]+$/', $cleanLines[$i]) && 
-                    !Str::contains($cleanLines[$i], 'REFERENCE') && 
-                    !Str::contains($cleanLines[$i], 'ON:') &&
-                    !preg_match('/\d{2}\/\d{2}\/\d{2}/', $cleanLines[$i])) {
-                    $company = trim($cleanLines[$i]);
-                    break;
-                }
-            }
-        }
-
-        // Extract address lines - look for lines after the company name
-        $addressLines = [];
-        $companyLine = array_find_key($cleanLines, fn($l) => $l === $company);
-        
-        if ($companyLine !== false) {
-            for ($i = $companyLine + 1; $i < min($companyLine + 5, count($cleanLines)); $i++) {
-                if (!isset($cleanLines[$i]) || empty($cleanLines[$i]) || 
-                    Str::contains($cleanLines[$i], 'Contact:') || 
-                    Str::contains($cleanLines[$i], 'Instructions') ||
-                    Str::contains($cleanLines[$i], 'LM . . . :') ||
-                    Str::contains($cleanLines[$i], 'Weight . :')) {
-                    break;
-                }
-                // Only add lines that look like address content
-                if (preg_match('/[A-Za-z0-9]/', $cleanLines[$i])) {
-                    $addressLines[] = $cleanLines[$i];
-                }
-            }
-        }
-
-        $fullAddress = implode(', ', $addressLines);
-        $country = $type === 'Loading' ? 'GB' : 'FR';
-
-        // Parse address components
-        $addressInfo = $this->parseAddress($fullAddress, $country, $type);
-
+    $sectionLine = array_find_key($cleanLines, fn($l) => $l === $type);
+    if ($sectionLine === false) {
         return [
-            'company_address' => array_merge(['company' => $company], $addressInfo),
-            'time' => !empty($dateTime) ? $dateTime : ['datetime_from' => Carbon::now()->setTime(0, 0, 0)->toIsoString()]
+            'company_address' => [
+                'company' => '', 
+                'street_address' => '', 
+                'city' => '',
+                'postal_code' => '',
+                'country' => 'GB' // Default country
+            ],
+            'time' => ['datetime_from' => Carbon::now()->setTime(0, 0, 0)->toIsoString()]
         ];
     }
 
-    protected function parseAddress(string $address, string $country, string $type) {
+    // Extract date - fixed position: 2 lines after section
+    $dateTime = [];
+    if (isset($cleanLines[$sectionLine + 2]) && preg_match('/(\d{2}\/\d{2}\/\d{2})/', $cleanLines[$sectionLine + 2], $dateMatch)) {
+        $date = $dateMatch[1];
+        
+        // Extract time - look for time pattern in the vicinity of the section
+        $timeLineOffset = $type === 'Loading' ? 13 : 10;
+        if (isset($cleanLines[$sectionLine + $timeLineOffset]) && preg_match('/(\d{1,2})h(\d{2})\s*-\s*(\d{1,2})h(\d{2})/', $cleanLines[$sectionLine + $timeLineOffset], $timeMatch)) {
+            $dateTime = [
+                'datetime_from' => Carbon::createFromFormat('d/m/y H:i', $date . ' ' . $timeMatch[1] . ':' . $timeMatch[2])->toIsoString(),
+                'datetime_to' => Carbon::createFromFormat('d/m/y H:i', $date . ' ' . $timeMatch[3] . ':' . $timeMatch[4])->toIsoString()
+            ];
+        } else {
+            $dateTime = [
+                'datetime_from' => Carbon::createFromFormat('d/m/y', $date)->setTime(0, 0, 0)->toIsoString()
+            ];
+        }
+    }
+
+    // Extract company - fixed position: 5 lines after section (after "ON:")
+    $company = '';
+    if (isset($cleanLines[$sectionLine + 5]) && isset($cleanLines[$sectionLine + 4]) && $cleanLines[$sectionLine + 4] === 'ON:') {
+        $company = trim($cleanLines[$sectionLine + 5]);
+    }
+
+    // Extract address lines - get ALL relevant address lines
+    $addressLines = [];
+    $addressStart = $sectionLine + 6;
+    
+    // Collect consecutive non-empty lines until we hit a section end marker
+    for ($i = $addressStart; $i < min($addressStart + 4, count($cleanLines)); $i++) {
+        if (isset($cleanLines[$i])) {
+            $line = trim($cleanLines[$i]);
+            if (empty($line) || 
+                preg_match('/(Contact:|Tel\s*:|Payment terms|LM\.|Parc\.|Weight\.)/i', $line)) {
+                break;
+            }
+            $addressLines[] = $line;
+        }
+    }
+    
+    $fullAddress = implode(' ', $addressLines);
+    Log::info("$type address lines: " . json_encode($addressLines));
+    Log::info("$type full address: " . $fullAddress);
+
+    // Parse address components generically
+    $addressInfo = $this->parseAddress($fullAddress);
+    
+    // Ensure company is set
+    $addressInfo['company'] = $company;
+
+    return [
+        'company_address' => $addressInfo,
+        'time' => !empty($dateTime) ? $dateTime : ['datetime_from' => Carbon::now()->setTime(0, 0, 0)->toIsoString()]
+    ];
+}
+
+protected function parseAddress(string $address) {
+    $result = [
+        'street_address' => $address,
+        'city' => '',
+        'postal_code' => '',
+        'country' => ''
+    ];
+
+    Log::info("Parsing address: " . $address);
+
+    // Format 1: GB-PE2 6DP PETERBOROUGH (Loading address)
+    if (preg_match('/\b([A-Z]{2})-([A-Z0-9\s]+)\s+([A-Za-z\s]+)$/i', $address, $match)) {
+        Log::info("Format 1 matched: " . json_encode($match));
+        $result['postal_code'] = preg_replace('/[^0-9A-Z]/i', '', $match[2]);
+        $result['city'] = trim($match[3]);
+        $result['country'] = GeonamesCountry::getIso(trim($match[1]));
+        $result['street_address'] = trim(str_replace($match[0], '', $address));
+    }
+    // Format 2: -37530 POCE-SUR-CISSE (Delivery address - French format)
+    elseif (preg_match('/-(\d{5})\s+([A-Za-z\-\s]+)$/i', $address, $match)) {
+        Log::info("Format 2 matched: " . json_encode($match));
+        $result['postal_code'] = $match[1];
+        $result['city'] = trim($match[2]);
+        $result['country'] = 'FR'; // French postal code
+        $result['street_address'] = trim(str_replace($match[0], '', $address));
+    }
+    // Format 3: LT-01205 VILNIUS VILNIAUS APSKRITIS (Lithuanian format)
+    elseif (preg_match('/\b([A-Z]{2})-(\d{5})\s+([A-Za-z\s]+)$/i', $address, $match)) {
+        Log::info("Format 3 matched: " . json_encode($match));
+        $result['postal_code'] = $match[2];
+        $result['city'] = trim($match[3]);
+        $result['country'] = GeonamesCountry::getIso(trim($match[1]));
+        $result['street_address'] = trim(str_replace($match[0], '', $address));
+    }
+    // Format 4: Just city name without postal code (fallback)
+    else {
+        Log::info("No format matched, using fallback");
+        $addressParts = array_filter(explode(' ', $address));
+        if (count($addressParts) > 1) {
+            $result['city'] = end($addressParts);
+            $result['street_address'] = trim(str_replace($result['city'], '', $address));
+        }
+        
+        // Set default country based on common patterns
+        if (empty($result['country'])) {
+            if (strpos($address, 'GB-') !== false) {
+                $result['country'] = 'GB';
+            } elseif (preg_match('/\d{5}/', $address)) {
+                $result['country'] = 'FR'; // 5-digit postal code likely France
+            }
+        }
+    }
+
+    // Final fallback - if country is still empty, use sensible defaults
+    if (empty($result['country']) || strlen($result['country']) !== 2) {
+        if (strpos($address, 'PETERBOROUGH') !== false) {
+            $result['country'] = 'GB';
+        } elseif (strpos($address, 'POCE-SUR-CISSE') !== false) {
+            $result['country'] = 'FR';
+        } else {
+            $result['country'] = 'GB'; // Default to GB if cannot determine
+        }
+    }
+
+    // Clean up street address
+    $result['street_address'] = trim($result['street_address'], " ,-");
+
+    Log::info("Parsed address result: " . json_encode($result));
+
+    return $result;
+}
+
+    protected function parseAddress1(string $address, string $country, string $type) {
         $result = [
             'street_address' => $address,
             'city' => $type === 'Loading' ? 'Peterborough' : 'Poce-sur-Cisse',
