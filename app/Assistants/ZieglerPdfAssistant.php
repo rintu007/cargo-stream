@@ -138,179 +138,216 @@ class ZieglerPdfAssistant extends PdfClient
     }
 
     protected function extractLocationSection(array $cleanLines, int $startIndex, string $type) {
-        $sectionData = [
-            'company' => '',
-            'reference' => '',
-            'address_lines' => [],
-            'date' => '',
-            'time' => '',
-            'cargo_info' => ''
-        ];
+    $sectionData = [
+        'company' => '',
+        'reference' => '',
+        'address_lines' => [],
+        'date' => '',
+        'time' => '',
+        'cargo_info' => ''
+    ];
+    
+    $i = $startIndex + 1;
+    $maxLines = min($startIndex + 15, count($cleanLines));
+    $linesProcessed = 0;
+    
+    while ($i < $maxLines && $linesProcessed < 10) {
+        $line = $cleanLines[$i];
         
-        $i = $startIndex + 1;
-        $maxLines = min($startIndex + 15, count($cleanLines));
-        $linesProcessed = 0;
+        if (empty($line)) {
+            $i++;
+            continue;
+        }
         
-        while ($i < $maxLines && $linesProcessed < 10) {
-            $line = $cleanLines[$i];
-            
-            if (empty($line)) {
-                $i++;
-                continue;
+        // Stop if we hit the next section OR if we hit the footer (starts with "-")
+        if (in_array($line, ['Collection', 'Delivery', 'Clearance']) || 
+            str_starts_with($line, '- ') || 
+            str_starts_with($line, 'Please find below')) {
+            break;
+        }
+        
+        // Skip REF label but capture the reference value
+        if ($line === 'REF') {
+            if (isset($cleanLines[$i + 1]) && $cleanLines[$i + 1] !== 'REF') {
+                $sectionData['reference'] = $cleanLines[$i + 1];
+                $i++; // Skip the next line since we used it
             }
-            
-            // Stop if we hit the next section
-            if (in_array($line, ['Collection', 'Delivery', 'Clearance', '- Payment will only be made'])) {
-                break;
-            }
-            
-            // Skip REF label but capture the reference value
-            if ($line === 'REF') {
-                if (isset($cleanLines[$i + 1]) && $cleanLines[$i + 1] !== 'REF') {
-                    $sectionData['reference'] = $cleanLines[$i + 1];
-                    $i++; // Skip the next line since we used it
-                }
-                $i++;
-                $linesProcessed++;
-                continue;
-            }
-            
-            // Date (DD/MM/YYYY format)
-            if (preg_match('/^\d{2}\/\d{2}\/\d{4}$/', $line)) {
-                $sectionData['date'] = $line;
-            }
-            // Time (HHMM-HHMM format)
-            elseif (preg_match('/^\d{4}-\d{4}$/', $line)) {
-                $sectionData['time'] = $line;
-            }
-            // Cargo information (e.g., "66 PALLETS")
-            elseif (preg_match('/^\d+\s+(PALLETS?|CARTONS?|BOXES)/i', $line)) {
-                $sectionData['cargo_info'] = $line;
-            }
-            // Company name (first non-empty line that's not a date/time/ref)
-            elseif (empty($sectionData['company']) && !preg_match('/^\d/', $line)) {
-                $sectionData['company'] = $line;
-            }
-            // Address lines
-            else {
-                $sectionData['address_lines'][] = $line;
-            }
-            
             $i++;
             $linesProcessed++;
+            continue;
         }
         
-        // Parse the address information
-        $addressInfo = $this->parseAddress($sectionData['address_lines'], $sectionData['company']);
-        
-        if (!empty($sectionData['reference'])) {
-            $addressInfo['comment'] = $sectionData['reference'];
+        // Date (DD/MM/YYYY format)
+        if (preg_match('/^\d{2}\/\d{2}\/\d{4}$/', $line)) {
+            $sectionData['date'] = $line;
+        }
+        // Time (HHMM-HHMM format)
+        elseif (preg_match('/^\d{4}-\d{4}$/', $line)) {
+            $sectionData['time'] = $line;
+        }
+        // Cargo information (e.g., "66 PALLETS")
+        elseif (preg_match('/^\d+\s+(PALLETS?|CARTONS?|BOXES)/i', $line)) {
+            $sectionData['cargo_info'] = $line;
+        }
+        // Company name (first non-empty line that's not a date/time/ref)
+        elseif (empty($sectionData['company']) && !preg_match('/^\d/', $line)) {
+            $sectionData['company'] = $line;
+        }
+        // Address lines - but skip obvious non-address lines
+        elseif (!preg_match('/^(delivery slot|please|payment|all business|delivery to|please quote|this booking|please confirm|please ensure)/i', $line)) {
+            $sectionData['address_lines'][] = $line;
         }
         
-        // Parse date/time
-        $timeInfo = $this->parseDateTime($sectionData['date'], $sectionData['time']);
-        
-        return [
-            'company_address' => $addressInfo,
-            'time' => $timeInfo
-        ];
+        $i++;
+        $linesProcessed++;
     }
+    
+    // Parse the address information
+    $addressInfo = $this->parseAddress($sectionData['address_lines'], $sectionData['company']);
+    
+    if (!empty($sectionData['reference'])) {
+        $addressInfo['comment'] = $sectionData['reference'];
+    }
+    
+    // Parse date/time
+    $timeInfo = $this->parseDateTime($sectionData['date'], $sectionData['time']);
+    
+    return [
+        'company_address' => $addressInfo,
+        'time' => $timeInfo
+    ];
+}
 
     protected function parseAddress(array $addressLines, string $company) {
-        $fullAddress = implode(', ', $addressLines);
-        $result = [
-            'company' => $company,
-            'street_address' => $fullAddress,
-            'city' => '',
-            'postal_code' => '',
-            'country' => ''
+    // Filter out any lines that are clearly not part of the address
+    $filteredLines = array_filter($addressLines, function($line) {
+        $excludedPatterns = [
+            '/^delivery slot/i',
+            '/^please/i',
+            '/^payment/i',
+            '/^all business/i',
+            '/^delivery to/i',
+            '/^please quote/i',
+            '/^this booking/i',
+            '/^please confirm/i',
+            '/^please ensure/i',
+            '/^- /' // Lines starting with dash (bullet points)
         ];
-
-        Log::info("Parsing Ziegler address: " . $fullAddress);
-
-        // Format 1: UK address with postal code at end (LEIGHTON BUZZARD, LU7 4UH)
-        if (preg_match('/(.*),\s*([A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2})$/i', $fullAddress, $match)) {
-            $result['street_address'] = trim($match[1]);
-            $result['postal_code'] = preg_replace('/\s+/', '', $match[2]);
-            $result['country'] = 'GB';
-            
-            // Extract city from the street address part
-            $addressParts = explode(',', $result['street_address']);
-            if (count($addressParts) > 1) {
-                $result['city'] = trim(end($addressParts));
-                $result['street_address'] = trim(implode(',', array_slice($addressParts, 0, -1)));
+        
+        foreach ($excludedPatterns as $pattern) {
+            if (preg_match($pattern, $line)) {
+                return false;
             }
         }
-        // Format 2: French address with FR prefix (ENNERY, FR-57365)
-        elseif (preg_match('/(.*),\s*FR-?(\d{5})$/i', $fullAddress, $match)) {
-            $result['street_address'] = trim($match[1]);
-            $result['postal_code'] = $match[2];
-            $result['country'] = 'FR';
-            
-            $addressParts = explode(',', $result['street_address']);
-            if (count($addressParts) > 1) {
-                $result['city'] = trim(end($addressParts));
-                $result['street_address'] = trim(implode(',', array_slice($addressParts, 0, -1)));
-            }
-        }
-        // Format 3: French address without FR prefix but with postal code (STIRING WENDEL, FR57350)
-        elseif (preg_match('/(.*),\s*([A-Z]{2}\d{5})$/i', $fullAddress, $match)) {
-            $result['street_address'] = trim($match[1]);
-            $result['postal_code'] = substr($match[2], 2);
-            $result['country'] = 'FR';
-            
-            $addressParts = explode(',', $result['street_address']);
-            if (count($addressParts) > 1) {
-                $result['city'] = trim(end($addressParts));
-                $result['street_address'] = trim(implode(',', array_slice($addressParts, 0, -1)));
-            }
-        }
-        // Format 4: UK address with postal code in middle (TN25 6GE Ashford)
-        elseif (preg_match('/(.*)\s+([A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2})\s+(.+)$/i', $fullAddress, $match)) {
-            $result['street_address'] = trim($match[1]);
-            $result['postal_code'] = preg_replace('/\s+/', '', $match[2]);
-            $result['city'] = trim($match[3]);
-            $result['country'] = 'GB';
-        }
+        return true;
+    });
+    
+    $fullAddress = implode(', ', array_values($filteredLines));
+    $result = [
+        'company' => $company,
+        'street_address' => $fullAddress,
+        'city' => '',
+        'postal_code' => '',
+        'country' => ''
+    ];
 
-        // Clean up
-        $result['street_address'] = trim($result['street_address'], " ,-");
-        $result['city'] = trim($result['city'], " ,-");
+    Log::info("Parsing Ziegler address: " . $fullAddress);
 
-        // If city is still empty, try to extract from address lines
-        if (empty($result['city'])) {
-            foreach ($addressLines as $line) {
-                // Look for city names (words that are all uppercase and more than 3 characters)
-                if (preg_match('/^[A-Z][a-z]+$/', $line) || preg_match('/^[A-Z\s]+$/', $line)) {
-                    $potentialCity = trim($line);
-                    if (strlen($potentialCity) > 2 && !in_array($potentialCity, ['REF', 'PICK', 'UP', 'T1'])) {
-                        $result['city'] = $potentialCity;
-                        break;
-                    }
-                }
-            }
+    // Format 1: UK address with postal code at end (LEIGHTON BUZZARD, LU7 4UH)
+    if (preg_match('/(.*),\s*([A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2})$/i', $fullAddress, $match)) {
+        $result['street_address'] = trim($match[1]);
+        $result['postal_code'] = preg_replace('/\s+/', '', $match[2]);
+        $result['country'] = 'GB';
+        
+        // Extract city from the street address part
+        $addressParts = explode(',', $result['street_address']);
+        if (count($addressParts) > 1) {
+            $result['city'] = trim(end($addressParts));
+            $result['street_address'] = trim(implode(',', array_slice($addressParts, 0, -1)));
         }
-
-        // Final country fallback
-        if (empty($result['country'])) {
-            if (strpos($fullAddress, 'UK') !== false || stripos($fullAddress, 'London') !== false) {
-                $result['country'] = 'GB';
-            } elseif (strpos($fullAddress, 'FR') !== false) {
-                $result['country'] = 'FR';
-            } else {
-                $result['country'] = 'GB'; // Default to UK for Ziegler
-            }
-        }
-
-        // Ensure city has minimum length
-        if (strlen($result['city']) < 2) {
-            $result['city'] = 'Unknown';
-        }
-
-        Log::info("Parsed address result: " . json_encode($result));
-
-        return $result;
     }
+    // Format 2: French address with FR prefix (ENNERY, FR-57365)
+    elseif (preg_match('/(.*),\s*FR-?(\d{5})$/i', $fullAddress, $match)) {
+        $result['street_address'] = trim($match[1]);
+        $result['postal_code'] = $match[2];
+        $result['country'] = 'FR';
+        
+        $addressParts = explode(',', $result['street_address']);
+        if (count($addressParts) > 1) {
+            $result['city'] = trim(end($addressParts));
+            $result['street_address'] = trim(implode(',', array_slice($addressParts, 0, -1)));
+        }
+    }
+    // Format 3: French address without FR prefix but with postal code (STIRING WENDEL, FR57350)
+    elseif (preg_match('/(.*),\s*([A-Z]{2}\d{5})$/i', $fullAddress, $match)) {
+        $result['street_address'] = trim($match[1]);
+        $result['postal_code'] = substr($match[2], 2);
+        $result['country'] = 'FR';
+        
+        $addressParts = explode(',', $result['street_address']);
+        if (count($addressParts) > 1) {
+            $result['city'] = trim(end($addressParts));
+            $result['street_address'] = trim(implode(',', array_slice($addressParts, 0, -1)));
+        }
+    }
+    // Format 4: UK address with postal code in middle (TN25 6GE Ashford)
+    elseif (preg_match('/(.*)\s+([A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2})\s+(.+)$/i', $fullAddress, $match)) {
+        $result['street_address'] = trim($match[1]);
+        $result['postal_code'] = preg_replace('/\s+/', '', $match[2]);
+        $result['city'] = trim($match[3]);
+        $result['country'] = 'GB';
+    }
+    // Format 5: Simple French address with postal code at end (STIRING WENDEL, 57350)
+    elseif (preg_match('/(.*),\s*(\d{5})$/i', $fullAddress, $match)) {
+        $result['street_address'] = trim($match[1]);
+        $result['postal_code'] = $match[2];
+        $result['country'] = 'FR';
+        
+        $addressParts = explode(',', $result['street_address']);
+        if (count($addressParts) > 1) {
+            $result['city'] = trim(end($addressParts));
+            $result['street_address'] = trim(implode(',', array_slice($addressParts, 0, -1)));
+        }
+    }
+
+    // Clean up
+    $result['street_address'] = trim($result['street_address'], " ,-");
+    $result['city'] = trim($result['city'], " ,-");
+
+    // If city is still empty, try to extract from address lines
+    if (empty($result['city'])) {
+        foreach ($filteredLines as $line) {
+            // Look for city names (words that are all uppercase and more than 3 characters)
+            $cleanLine = trim($line);
+            if (strlen($cleanLine) > 2 && 
+                !in_array($cleanLine, ['REF', 'PICK', 'UP', 'T1', 'RUE ROBERT SCHUMANN']) &&
+                !preg_match('/^\d/', $cleanLine)) {
+                $result['city'] = $cleanLine;
+                break;
+            }
+        }
+    }
+
+    // Final country fallback
+    if (empty($result['country'])) {
+        if (strpos($fullAddress, 'UK') !== false || stripos($fullAddress, 'London') !== false) {
+            $result['country'] = 'GB';
+        } elseif (strpos($fullAddress, 'FR') !== false) {
+            $result['country'] = 'FR';
+        } else {
+            $result['country'] = 'GB'; // Default to UK for Ziegler
+        }
+    }
+
+    // Ensure city has minimum length
+    if (strlen($result['city']) < 2) {
+        $result['city'] = 'Unknown';
+    }
+
+    Log::info("Parsed address result: " . json_encode($result));
+
+    return $result;
+}
 
     protected function parseDateTime(string $date, string $time) {
         $result = [];
